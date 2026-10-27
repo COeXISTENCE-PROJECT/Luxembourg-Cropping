@@ -93,7 +93,7 @@ project/
 │       ├── lust.net.xml
 │       ├── DUERoutes/local.static.*.rou.xml
 │       ├── transit.rou.xml
-│       ├── buslines.rou.xml, busses.rou.xml, trams.rou.xml, trains.rou.xml
+│       ├── buslines.rou.xml, busses.rou.xml
 │       ├── vtypes.add.xml
 │       ├── busstops.add.xml
 │       ├── tll.static.xml
