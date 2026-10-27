@@ -1,0 +1,4 @@
+networkx>=2.8
+pandas>=1.5
+matplotlib>=3.5
+janux

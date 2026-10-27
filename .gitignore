@@ -1,0 +1,38 @@
+# Generated crops (large, reproducible)
+luxembourg_custom_*/
+luxembourg_*/
+crops/
+networks/
+crop_tests/
+LuSTScenario/
+
+# SUMO outputs
+*.net.xml
+*.edg.xml
+*.nod.xml
+*.con.xml
+*.tll.xml
+*.typ.xml
+*.netccfg
+*.rou.xml
+*.sumocfg
+stats.xml
+summary.xml
+tripinfo.xml
+*.log
+bad_od.json
+*.bak
+
+# Python
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+venv/
+.env
+*.egg-info/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+.DS_Store
