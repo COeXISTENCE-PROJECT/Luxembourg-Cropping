@@ -539,10 +539,10 @@ crop). Not an error, just an empty background.
 
 ---
 
-## 12. FAQ
+## 12. some questions
 
 **Q: Can I run the crop on a different rectangle?**
-Yes — `--geo XMIN XMAX YMIN YMAX`. The output folder name changes
+change — `--geo XMIN XMAX YMIN YMAX`. The output folder name changes
 accordingly (`luxembourg_custom_<coords>`), so successive runs do not
 overwrite each other.
 
@@ -553,25 +553,83 @@ may mutate into AVs. They are merged into the human pool and appear in
 
 **Q: Why are buses excluded from `agents.csv`?**
 Buses are background traffic and not part of the AV mutation pool. They go
-into `background_buses.rou.xml`.
-
-**Q: What does the "sanitization" step do?**
-LuST has anomalous edge IDs like `--30694#2` (double leading dash) that
-break JanuX. The sanitizer rewrites them to `30694#2` in the source
-`.net.xml` before cropping. This is applied consistently to the network,
-the demand, and the reference exit-times so nothing breaks.
-
-**Q: What if I want to keep the `--` prefix?**
-You can't — JanuX cannot parse it. The sanitization is required.
-
-**Q: What if I don't want the OD path filter?**
-Add `--skip-path-filter` to `build_lux_crop.py`. The agents for all OD pairs
-are kept, but the JanuX path generation may hang on the problematic ones.
-Use `check_janux_od.py` + `apply_bad_od_filter.py` instead to only drop the
-ones that actually fail.
+into `background_buses.rou.xml`. (that's where trams or trains or other should also go if there are included in another city files)
 
 ---
 
-## 13. License
+## 13. Reference SUMO outputs (`sumo_files/`)
+
+The `sumo_files/` directory contains the reference simulation outputs used
+by `build_lux_crop.py` to estimate crop-entry times. They were produced by
+running the LuST reference simulation once (the one that covers the whole
+Luxembourg network up to t=9h30), and contain:
+
+| File                                        | Description                                                                                                                                                                                             |
+| ------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `due.static.vehroute.until9.unfinished.xml` | Per-edge exit times for every vehicle inserted before 9h. Unfinished vehicles carry `-1` markers on the edges they had not reached yet. **Primary source for entry-time estimation (`vehroute` mode).** |
+| `due.static.until9.tripinfo.xml`            | Per-vehicle trip durations for vehicles that arrived before 9h30. Fallback source for `prop_ff`.                                                                                                        |
+
+### How to use these files
+
+Copy them into `LuSTScenario/scenario/` so `build_lux_crop.py` finds them:
+
+```bash
+cp sumo_files/* LuSTScenario/scenario/
+```
+
+`build_lux_crop.py` looks for the vehroute and tripinfo files in that
+directory (see §1, "LuST data files required"). Without them, the pipeline
+still runs but falls back to free-flow × congestion-factor estimation,
+which is less accurate for entry times at the crop boundary (see §4.2).
+
+### How to regenerate them for a different time window
+
+If you want to crop a window that extends **beyond 9h30** (the end time of
+the current reference), you must regenerate the reference outputs:
+
+1. Open the reference config `LuSTScenario/scenario/due.static.until9.sumocfg`
+2. Change the `<end>` value in the `<time>` section. For example, to
+   extend the reference to 10:
+
+   ```xml
+   <time>
+       <begin value="0"/>
+       <end value="36000"/>     <!-- 10h = 36000 s -->
+       <step-length value="1"/>
+   </time>
+   ```
+
+3. Regenerate the outputs from the LuST scenario directory:
+
+   ```bash
+   cd LuSTScenario/scenario
+   sumo -c due.static.until9.sumocfg
+   ```
+
+   `--vehroute-output.write-unfinished true` is **required** — without it,
+   vehicles still running at `<end>` would be silently dropped from the
+   vehroute file.
+
+4. Copy the regenerated files back to `sumo_files/` if you want to keep
+   them with the pipeline for future reference.
+
+The filenames (`until9`, etc.) are just conventions. What matters for
+`build_lux_crop.py` is the `<end>` value used when the files were produced:
+if you crop a window that ends after that value, the coverage of the
+`vehroute` estimator drops and the fallback estimators (`prop_ff`,
+`ff_global`) are used more often.
+
+### Coverage and limits
+
+For a crop window of **7h45–8h30**, coverage is good (~92 % of the
+demand has an exact entry time for vehroute until 9h). It degrades toward the end of
+the reference window (~88 % around 8h45, because fewer vehicles have
+reached their crop-entry edge by 9h).
+
+For crop windows **ending after 9h**, regenerate the reference as
+described above. The filenames can stay the same — only the `<end>` value
+in the sumocfg that produced them matters.
+
+## 14. License
 
 The LuST scenario is MIT-licensed (see LuSTScenario/scenario/)
