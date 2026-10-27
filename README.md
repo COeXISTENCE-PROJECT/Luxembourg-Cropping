@@ -574,5 +574,4 @@ ones that actually fail.
 
 ## 13. License
 
-The LuST scenario is MIT-licensed (see LuSTScenario/scenario/). The scripts
-in this repository are released under the same license.
+The LuST scenario is MIT-licensed (see LuSTScenario/scenario/)
