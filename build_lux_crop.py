@@ -25,6 +25,8 @@ URB convention notes
   JanuX builds its graph from it.
 - The human vehicle demand goes into human_demand.rou.xml.
 - vTypes from LuST are merged inline into the demand files.
+- custom.sumocfg is regenerated after post-processing so it references the
+  final (renamed) files, using ../ prefixes when it lives in _validation/.
 """
 
 from __future__ import annotations
@@ -1050,6 +1052,7 @@ def write_agents_csv(records: List[dict], out_path: str) -> Tuple[int, int, int]
         id,start_time,origin,destination,kind
 
     - `id` is the clean 0..N-1 agent index (matches agent_id in demand_routes.csv)
+    - `start_time` is rounded to an integer (URB and JanuX read it as int)
     - origin / destination are integer indices into the od_*.txt lists
     - the original LuST vehicle id is preserved in demand_routes.csv (source_id)
     """
@@ -1072,8 +1075,9 @@ def write_agents_csv(records: List[dict], out_path: str) -> Tuple[int, int, int]
 
     lines = ["id,start_time,origin,destination,kind"]
     for i, r in enumerate(records):
+        start_int = int(round(r["depart"]))
         lines.append(
-            f"{i},{r['depart']:.6f},"
+            f"{i},{start_int},"
             f"{int(o_idx[r['edges'][0]])},{int(d_idx[r['edges'][-1]])},Human"
         )
     with open(out_path, "w", encoding="utf-8") as f:
@@ -1117,6 +1121,13 @@ def write_sumocfg(network_name: str, output_dir: str,
                   route_files: List[str],
                   additional_files: List[str],
                   sim_params: Dict[str, int]) -> str:
+    """
+    Write a SUMO config using the pre-postprocess file names (local.0.rou.xml,
+    vtypes.add.xml, etc.). Used only for the initial validation run.
+
+    The final config, pointing to the renamed files, is regenerated after
+    postprocess_for_urb with write_sumocfg_explicit().
+    """
     processing_lines = [f'        <{k} value="{v}"/>' for k, v in sim_params.items()]
     processing_xml = "\n".join(processing_lines)
 
@@ -1151,6 +1162,59 @@ def write_sumocfg(network_name: str, output_dir: str,
     with open(path, "w", encoding="utf-8") as f:
         f.write(cfg)
     return path
+
+
+def write_sumocfg_explicit(output_path: str,
+                           net_file: str,
+                           route_files: List[str],
+                           additional_files: List[str],
+                           sim_params: Dict[str, int]) -> str:
+    """
+    Write a SUMO config with explicit file paths.
+
+    Unlike write_sumocfg, this accepts paths that may include '../' prefixes,
+    so it can be used after URB post-processing when the config lives in a
+    sub-folder (e.g. _validation/) but the network and demand files live one
+    level up.
+    """
+    processing_lines = [f'        <{k} value="{v}"/>' for k, v in sim_params.items()]
+    processing_xml = "\n".join(processing_lines)
+
+    input_body = f'        <net-file value="{net_file}"/>\n'
+    input_body += f'        <route-files value="{",".join(route_files)}"/>\n'
+    if additional_files:
+        input_body += (
+            f'        <additional-files value="{",".join(additional_files)}"/>\n'
+        )
+
+    cfg = f"""<?xml version="1.0" encoding="UTF-8"?>
+<configuration xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+               xsi:noNamespaceSchemaLocation="http://sumo.dlr.de/xsd/sumoConfiguration.xsd">
+    <input>
+{input_body}    </input>
+    <time>
+        <begin value="0"/>
+    </time>
+    <output>
+        <statistic-output value="stats.xml"/>
+        <summary-output value="summary.xml"/>
+        <tripinfo-output value="tripinfo.xml"/>
+    </output>
+    <processing>
+{processing_xml}
+    </processing>
+    <report>
+        <no-step-log value="true"/>
+        <duration-log.statistics value="true"/>
+        <message-log value="sumo_messages.log"/>
+        <error-log value="sumo_errors.log"/>
+    </report>
+</configuration>
+"""
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+    with open(output_path, "w", encoding="utf-8") as f:
+        f.write(cfg)
+    return output_path
 
 
 # =============================================================================
@@ -1223,26 +1287,101 @@ def update_netccfg_with_typ(netccfg_path: str, network_name: str) -> bool:
     return True
 
 
+def _collect_vtype_defs(root):
+    """Retourne {id: element} pour tous les vType / vTypeDistribution de premier niveau."""
+    out = {}
+    for c in root:
+        if c.tag in ("vType", "vTypeDistribution"):
+            cid = c.get("id")
+            if cid:
+                out[cid] = c
+    return out
+
+
+def strip_vtypes_from_routes(routes_path: str) -> int:
+    """Supprime tous les vType / vTypeDistribution de premier niveau."""
+    if not os.path.exists(routes_path):
+        return 0
+    tree = ET.parse(routes_path)
+    root = tree.getroot()
+    removed = 0
+    for c in list(root):
+        if c.tag in ("vType", "vTypeDistribution"):
+            root.remove(c)
+            removed += 1
+    if removed:
+        indented_xml_write(root, routes_path)
+    return removed
+
 def merge_vtypes_into_routes(routes_path: str, vtypes_path: str) -> int:
+    """Inline tous les vType/vTypeDistribution de vtypes_path dans routes_path,
+    en préservant les distributions (vType imbriqués) et en sautant les ids
+    déjà définis."""
     if not os.path.exists(vtypes_path) or not os.path.exists(routes_path):
         return 0
+
     vt_root = ET.parse(vtypes_path).getroot()
-    vtypes = vt_root.findall("vType")
-    if not vtypes:
+    vtype_children = [c for c in vt_root
+                      if c.tag in ("vType", "vTypeDistribution")]
+    if not vtype_children:
         return 0
 
     tree = ET.parse(routes_path)
     root = tree.getroot()
+    existing_ids = set(_collect_vtype_defs(root).keys())
+
+    to_add = [c for c in vtype_children if c.get("id") not in existing_ids]
+    if not to_add:
+        return 0
+
     existing = list(root)
     for child in existing:
         root.remove(child)
-    for vt in vtypes:
+    for vt in to_add:
         root.append(copy.deepcopy(vt))
     for child in existing:
         root.append(child)
 
     indented_xml_write(root, routes_path)
-    return len(vtypes)
+    return len(to_add)
+
+
+def move_vtypes_to_primary(primary_path: str, secondary_path: str) -> int:
+    """
+    Garantit qu'aucun vType id n'apparaît dans les deux fichiers.
+    - Déplace de secondary vers primary tout vType absent de primary.
+    - Supprime tous les vType/vTypeDistribution de secondary.
+    Retourne le nombre de vTypes déplacés.
+    """
+    if not os.path.exists(primary_path) or not os.path.exists(secondary_path):
+        return 0
+
+    p_tree = ET.parse(primary_path)
+    p_root = p_tree.getroot()
+    s_tree = ET.parse(secondary_path)
+    s_root = s_tree.getroot()
+
+    p_defs = _collect_vtype_defs(p_root)
+    s_defs = _collect_vtype_defs(s_root)
+
+    to_prepend = [elem for cid, elem in s_defs.items() if cid not in p_defs]
+    if to_prepend:
+        p_children = list(p_root)
+        for c in p_children:
+            p_root.remove(c)
+        for vt in to_prepend:
+            p_root.append(copy.deepcopy(vt))
+        for c in p_children:
+            p_root.append(c)
+        indented_xml_write(p_root, primary_path)
+
+    if s_defs:
+        for c in list(s_root):
+            if c.tag in ("vType", "vTypeDistribution"):
+                s_root.remove(c)
+        indented_xml_write(s_root, secondary_path)
+
+    return len(to_prepend)
 
 
 def strip_bus_stops_from_routes(routes_path: str) -> int:
@@ -1350,16 +1489,26 @@ def postprocess_for_urb(output_dir: str, network_name: str,
 
     vtypes_path = os.path.join(output_dir, "vtypes.add.xml")
     if vtypes_mode == "merge" and os.path.exists(vtypes_path):
-        n_h = merge_vtypes_into_routes(demand_dst, vtypes_path)
+        # SUMO exige un namespace vType global unique.
+        # → on centralise TOUT dans background_buses.rou.xml
+        #   (qui contient déjà certains vTypes copiés depuis LuST),
+        #   et on strippe tout vType résiduel de human_demand.rou.xml.
         n_b = merge_vtypes_into_routes(new_bus, vtypes_path)
-        summary["vtypes_merged"] = n_h + n_b
-        print(f"  merged {n_h} vTypes into human_demand.rou.xml, "
-              f"{n_b} into background_buses.rou.xml")
+        n_stripped = strip_vtypes_from_routes(demand_dst)
+        summary["vtypes_merged"] = n_b
+        summary["vtypes_stripped_from_demand"] = n_stripped
+
+        print(f"  merged {n_b} vTypes into background_buses.rou.xml")
+        if n_stripped:
+            print(f"  stripped {n_stripped} stray vTypes from human_demand.rou.xml")
+        else:
+            print("  human_demand.rou.xml already has no vTypes (ok)")
+
         os.remove(vtypes_path)
-        print(f"  removed vtypes.add.xml (inlined)")
+        print("  removed vtypes.add.xml (inlined into background_buses)")
     elif vtypes_mode == "remove" and os.path.exists(vtypes_path):
         os.remove(vtypes_path)
-        print(f"  removed vtypes.add.xml (--vtypes-mode remove)")
+        print("  removed vtypes.add.xml (--vtypes-mode remove)")
 
     busstops_path = os.path.join(output_dir, "busstops.add.xml")
     if busstops_mode == "strip":
@@ -1728,7 +1877,6 @@ def main(argv: Optional[List[str]] = None) -> int:
         if len(segments) == 0:
             print("  [fatal] no agents left after path filtering. Aborting.")
             return 3
-        # Update stats so validate_outputs uses the filtered count
         st["segments_kept"] = len(segments)
 
     final_agent_count = len(segments)
@@ -1810,6 +1958,46 @@ def main(argv: Optional[List[str]] = None) -> int:
         sumo_ran=sumo_ran,
         source_net_path=src_net,
     )
+
+    # --- Rewrite custom.sumocfg with the final URB file layout -------------
+    # After post-processing, local.0.rou.xml is now human_demand.rou.xml,
+    # background_buslines.rou.xml is now background_buses.rou.xml, and
+    # vtypes.add.xml / busstops.add.xml have usually been inlined / removed.
+    # The pre-postprocess sumocfg points to the old names, so it must be
+    # regenerated with the new ones. If the config was moved into
+    # _validation/, all paths get a '../' prefix so SUMO resolves them
+    # correctly from inside that sub-folder.
+    if args.keep_sumocfg:
+        final_cfg = os.path.join(output_dir, "custom.sumocfg")
+        prefix = ""
+    else:
+        val_dir = os.path.join(output_dir, "_validation")
+        os.makedirs(val_dir, exist_ok=True)
+        final_cfg = os.path.join(val_dir, "custom.sumocfg")
+        prefix = "../"
+
+    # background_buses.rou.xml porte maintenant TOUS les vTypes :
+    # il doit être chargé en premier.
+    final_routes = []
+    if os.path.exists(os.path.join(output_dir, "background_buses.rou.xml")):
+        final_routes.append(f"{prefix}background_buses.rou.xml")
+    final_routes.append(f"{prefix}human_demand.rou.xml")
+    final_adds = []
+    if args.vtypes_mode == "keep" and \
+       os.path.exists(os.path.join(output_dir, "vtypes.add.xml")):
+        final_adds.append(f"{prefix}vtypes.add.xml")
+    if args.busstops_mode == "keep" and \
+       os.path.exists(os.path.join(output_dir, "busstops.add.xml")):
+        final_adds.append(f"{prefix}busstops.add.xml")
+
+    write_sumocfg_explicit(
+        output_path=final_cfg,
+        net_file=f"{prefix}{args.network_name}.net.xml",
+        route_files=final_routes,
+        additional_files=final_adds,
+        sim_params=sim_params,
+    )
+    print(f"  rewrote custom.sumocfg -> {final_cfg}")
 
     if args.write_metadata:
         final_net = ET.parse(
