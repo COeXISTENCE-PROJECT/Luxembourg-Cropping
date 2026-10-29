@@ -112,16 +112,9 @@ class CropCandidate:
         return f"{minutes}min"
 
     def folder_name(self) -> str:
-        # Include t0/t1 in folder name ONLY when they differ from the default,
-        # so per-crop time windows do not silently overwrite each other.
-        base = (f"luxembourg_custom_"
-                f"{int(self.xmin)}_{int(self.xmax)}_"
-                f"{int(self.ymin)}_{int(self.ymax)}")
-        if self.t0 is not None or self.t1 is not None:
-            t0 = self.t0 if self.t0 is not None else 7.0
-            t1 = self.t1 if self.t1 is not None else 9.0
-            base += f"_t{int(t0*60):04d}_{int(t1*60):04d}"
-        return base
+        # The build pipeline is invoked with --network-name cand.name,
+        # so the output folder is simply <base>/<name>.
+        return self.name
 
 
 @dataclass
@@ -144,7 +137,7 @@ def default_candidates() -> List[CropCandidate]:
     morning peak, which keeps the whole geometry (highway + urban + ramps)
     while cutting the agent count by ~60 %.
     """
-    
+
     """CropCandidate(
                 name="city_west_900",
                 xmin=7200, xmax=8100, ymin=5300, ymax=6200,
@@ -155,7 +148,7 @@ def default_candidates() -> List[CropCandidate]:
                 xmin=7750, xmax=8550, ymin=5450, ymax=6250,
                 description="city center (Ville Haute/Gare) — kept reference",
             ),'''
-            
+
              '''CropCandidate(
                         name="far_west_900",
                         xmin=1500, xmax=2400, ymin=7200, ymax=8100,
@@ -166,20 +159,19 @@ def default_candidates() -> List[CropCandidate]:
                         xmin=6400, xmax=7400, ymin=8000, ymax=9000,
                         description="northern plateau approach — kept reference",
                     ),"""
-                    
-                    
+
     return [
         # ------------------------------------------------------------------
         # 00-04 : URBAN REFERENCES (validated, do not touch)
         # ------------------------------------------------------------------
-        
+
         CropCandidate(
             name="city_south_900",
-            xmin=7700, xmax=8600, ymin=4600, ymax=5500,
+            xmin=7450, xmax=8950, ymin=4610, ymax=5700,
             t0=7.75, t1=8.50,
             description="south city (Bonnevoie/Gasperich) — kept reference",
         ),
-       
+
 
         # ------------------------------------------------------------------
         # 05-06 : HIGHWAY-CHOICE WINDOWS (EDIT ME)
@@ -622,9 +614,12 @@ AGENT_RE = re.compile(r"segments kept \(= agents\)\s*=\s*(\d+)")
 
 
 def run_pipeline(build_script: str, cand: CropCandidate,
-                 extra_args: List[str], out_log: str) -> int:
+                 extra_args: List[str], out_log: str,
+                 base_dir: str) -> int:
     cmd = [
         sys.executable, build_script,
+        "--base-dir",     base_dir,
+        "--network-name", cand.name,
         "--geo", *[str(v) for v in cand.geo()],
         "--skip-validation",
     ]
@@ -658,10 +653,8 @@ def run_pipeline(build_script: str, cand: CropCandidate,
         return -1
 
     n = int(m.group(1))
-    cand.output_dir = os.path.join(
-        os.path.dirname(os.path.abspath(build_script)),
-        cand.folder_name(),
-    )
+    # build_lux_crop with --network-name != "luxembourg" creates <base>/<name>
+    cand.output_dir = os.path.join(base_dir, cand.name)
     return n
 
 
@@ -675,11 +668,16 @@ def clean_crop_tests(path: str) -> None:
     os.makedirs(path, exist_ok=True)
 
 
-def clean_build_dirs(base: str) -> int:
+def clean_build_dirs(base: str, extra_names: Optional[List[str]] = None) -> int:
     n = 0
+    prefixes = ["luxembourg_custom_"]
+    if extra_names:
+        prefixes.extend(extra_names)
     for name in os.listdir(base):
         p = os.path.join(base, name)
-        if name.startswith("luxembourg_custom_") and os.path.isdir(p):
+        if not os.path.isdir(p):
+            continue
+        if any(name == pat or name.startswith(pat) for pat in prefixes):
             shutil.rmtree(p, ignore_errors=True)
             n += 1
     return n
@@ -709,7 +707,7 @@ def parse_args(argv=None) -> argparse.Namespace:
 
 def main(argv=None) -> int:
     args = parse_args(argv)
-    
+
     base = os.path.abspath(args.base_dir)
     net_path = os.path.join(base, "LuSTScenario", "scenario", "lust.net.xml")
 
@@ -723,13 +721,17 @@ def main(argv=None) -> int:
         print(f"[error] build_lux_crop.py not found: {build_script}")
         return 2
 
+    # Load candidates BEFORE cleaning so --clean-builds can target their names.
+    candidates = (load_candidates_from_file(args.windows_file)
+                  if args.windows_file else default_candidates())
+
     out_dir = os.path.join(base, args.out_dir)
     clean_crop_tests(out_dir)
     print(f"[clean] wiped {out_dir}")
 
     if args.clean_builds:
-        n = clean_build_dirs(base)
-        print(f"[clean] removed {n} luxembourg_custom_* folder(s)")
+        n = clean_build_dirs(base, extra_names=[c.name for c in candidates])
+        print(f"[clean] removed {n} crop folder(s)")
 
     print("Loading network geometry and features...")
     (edges, node_xy, node_edge_flags,
@@ -750,9 +752,6 @@ def main(argv=None) -> int:
         print("         edge roundabout flag values:")
         for v, n in diag["edge_rb_flags"].most_common(4):
             print(f"           {v:20s} : {n}")
-
-    candidates = (load_candidates_from_file(args.windows_file)
-                  if args.windows_file else default_candidates())
 
     for c in candidates:
         tls_in, rb_in, hwy_in, acc_in = count_features_in_rect(
@@ -786,7 +785,7 @@ def main(argv=None) -> int:
         for c in candidates:
             print(f"\n  [{c.name}]  T={c.time_label()}")
             log = os.path.join(out_dir, f"{c.name}.log")
-            n = run_pipeline(build_script, c, extra, log)
+            n = run_pipeline(build_script, c, extra, log, base)
             c.n_agents = n if n >= 0 else None
             if c.n_agents is not None:
                 mark = "OK " if c.n_agents <= args.max_agents else "HIGH"
