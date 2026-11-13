@@ -238,7 +238,6 @@ def _count_distinct_paths(G, origin, destination,
         pass
     return kept
 
-
 def filter_od_by_path_availability(
         segments: List[dict],
         con_xml_path: str,
@@ -246,26 +245,28 @@ def filter_od_by_path_availability(
         max_paths_probe: int = 20,
         similarity_threshold: float = 0.85,
         timeout_s: float = 2.0,
-) -> Tuple[List[dict], dict]:
+) -> Tuple[List[dict], List[dict], List[dict], dict]:
     """
-    Drop agents whose (origin, destination) pair has fewer than `min_paths`
-    distinct paths in the cropped network.
+    Returns (kept, background, unreachable, stats).
+    - kept:        OD pairs with >= min_paths distinct paths.
+    - background:  OD pairs with 1 <= n_paths < min_paths.
+    - unreachable: OD pairs with 0 paths.
     """
+    _empty_stats = {
+        "od_pairs_total": 0, "od_pairs_kept": 0,
+        "od_pairs_background": 0, "od_pairs_unreachable": 0,
+        "agents_before": len(segments), "agents_after": len(segments),
+        "agents_background": 0, "agents_unreachable": 0,
+        "min_paths": min_paths, "path_count_distribution": {},
+    }
+
     if not _HAS_NX:
         print("  [warn] networkx not installed, skipping path filter")
-        return segments, {
-            "od_pairs_total": 0, "od_pairs_kept": 0, "od_pairs_dropped": 0,
-            "agents_before": len(segments), "agents_after": len(segments),
-            "path_count_distribution": {},
-        }
+        return segments, [], [], _empty_stats
 
     if not os.path.exists(con_xml_path):
         print(f"  [warn] con file not found: {con_xml_path}, skipping filter")
-        return segments, {
-            "od_pairs_total": 0, "od_pairs_kept": 0, "od_pairs_dropped": 0,
-            "agents_before": len(segments), "agents_after": len(segments),
-            "path_count_distribution": {},
-        }
+        return segments, [], [], _empty_stats
 
     G = _build_path_graph(con_xml_path)
     print(f"  graph           : {G.number_of_nodes()} nodes, "
@@ -274,47 +275,56 @@ def filter_od_by_path_availability(
     od_pairs = sorted({(r["edges"][0], r["edges"][-1]) for r in segments})
     print(f"  unique OD pairs : {len(od_pairs)}")
 
-    kept_od = set()
-    dropped_od = set()
+    kept_od, bg_od, unreachable_od = set(), set(), set()
     per_od_paths = {}
 
     for i, (o, d) in enumerate(od_pairs, 1):
         paths = _count_distinct_paths(
-            G, o, d,
-            max_paths=max_paths_probe,
-            similarity_threshold=similarity_threshold,
-            timeout_s=timeout_s,
+            G, o, d, max_paths=max_paths_probe,
+            similarity_threshold=similarity_threshold, timeout_s=timeout_s,
         )
-        per_od_paths[(o, d)] = len(paths)
-        if len(paths) >= min_paths:
+        n = len(paths)
+        per_od_paths[(o, d)] = n
+        if n >= min_paths:
             kept_od.add((o, d))
+        elif n >= 1:
+            bg_od.add((o, d))
         else:
-            dropped_od.add((o, d))
+            unreachable_od.add((o, d))
+            
         if i % 10 == 0 or i == len(od_pairs):
             print(f"    {i}/{len(od_pairs)} OD pairs  "
-                  f"(kept={len(kept_od)}, dropped={len(dropped_od)})")
+                  f"(kept={len(kept_od)}, background={len(bg_od)}, "
+                  f"unreachable={len(unreachable_od)})")
 
-    filtered = [
-        r for r in segments
-        if (r["edges"][0], r["edges"][-1]) in kept_od
-    ]
+    kept = [r for r in segments if (r["edges"][0], r["edges"][-1]) in kept_od]
+    background = [r for r in segments if (r["edges"][0], r["edges"][-1]) in bg_od]
+    unreachable = [r for r in segments if (r["edges"][0], r["edges"][-1]) in unreachable_od]
 
     dist = Counter(per_od_paths.values())
 
-    if dropped_od:
-        print(f"  first 10 dropped OD pairs (origin -> destination: n_paths):")
-        for (o, d) in list(dropped_od)[:10]:
+    if bg_od:
+        print("  first 10 background OD pairs (origin -> destination: n_paths):")
+        for (o, d) in list(bg_od)[:10]:
             print(f"    {o} -> {d}: {per_od_paths[(o, d)]} path(s)")
 
-    return filtered, {
+    if unreachable_od:
+        print("  first 10 unreachable OD pairs (origin -> destination: n_paths):")
+        for (o, d) in list(unreachable_od)[:10]:
+            print(f"    {o} -> {d}: {per_od_paths[(o, d)]} path(s)")
+
+    return kept, background, unreachable, {
         "od_pairs_total": len(od_pairs),
         "od_pairs_kept": len(kept_od),
-        "od_pairs_dropped": len(dropped_od),
+        "od_pairs_background": len(bg_od),
+        "od_pairs_unreachable": len(unreachable_od),
         "agents_before": len(segments),
-        "agents_after": len(filtered),
+        "agents_after": len(kept),
+        "agents_background": len(background),
+        "agents_unreachable": len(unreachable),
+        "min_paths": min_paths,
         "path_count_distribution": dict(sorted(dist.items())),
     }
-
 
 # =============================================================================
 # ARGUMENT PARSING
@@ -362,6 +372,14 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                    help="Max seconds probing paths for a single OD pair.")
     p.add_argument("--skip-path-filter", action="store_true",
                    help="Disable the OD path availability filter.")
+    p.add_argument("--filter-mode", default="all",
+                   choices=["all", "clustered"],
+                   help="'all' (default): permissive NetworkX filter "
+                        "(min_paths=1). Agents with >=1 path stay in agents.csv "
+                        "(for later JanuX filtering). "
+                        "'clustered': strict NetworkX filter (respects "
+                        "--min-paths, default 6). Agents with 1..min_paths-1 "
+                        "paths are moved to background_buses.rou.xml.")
 
     # --- URB post-processing ------------------------------------------------
     p.add_argument("--vtypes-mode", default="merge",
@@ -876,6 +894,52 @@ def export_human_routes(records: List[dict], output_path: str,
     indented_xml_write(root, output_path)
     return output_path
 
+def append_humans_to_background_buses(bg_path: str, records: List[dict]) -> int:
+    """
+    Appends dropped human segments directly to background_buses.rou.xml.
+    Uses DEFAULT_VEHTYPE (always valid in SUMO) and departs with basic
+    attributes since these are just background noise.
+    """
+    if not records:
+        return 0
+
+    if os.path.exists(bg_path):
+        tree = ET.parse(bg_path)
+        root = tree.getroot()
+    else:
+        root = ET.Element("routes")
+        root.set("xmlns:xsi", "http://www.w3.org/2001/XMLSchema-instance")
+        root.set("xsi:noNamespaceSchemaLocation", "http://sumo.dlr.de/xsd/routes_file.xsd")
+        tree = ET.ElementTree(root)
+
+    existing_ids = {v.get("id") for v in root.findall("vehicle")}
+    added = 0
+
+    for r in records:
+        vid = f"bg_h_{r['id']}"
+        if vid in existing_ids:
+            continue
+        v = ET.SubElement(root, "vehicle")
+        v.set("id", vid)
+        v.set("type", "DEFAULT_VEHTYPE")
+        v.set("depart", f"{r['depart']:.2f}")
+        v.set("departLane", "best")
+        v.set("departPos", "random_free")
+        v.set("departSpeed", "0.00")
+        ET.SubElement(v, "route").set("edges", " ".join(r["edges"]))
+        existing_ids.add(vid)
+        added += 1
+
+    # Re-sort vehicles by depart time
+    vehicles = root.findall("vehicle")
+    vehicles.sort(key=lambda v: float(v.get("depart", "0")))
+    for v in vehicles:
+        root.remove(v)
+    for v in vehicles:
+        root.append(v)
+
+    indented_xml_write(root, bg_path)
+    return added
 
 # =============================================================================
 # BACKGROUND BUSES
@@ -1671,6 +1735,11 @@ def launch_sumo_gui(cfg_path: str, sumo_gui_bin: str) -> None:
 
 def main(argv: Optional[List[str]] = None) -> int:
     args = parse_args(argv)
+    
+    # Resolve --filter-mode
+    if args.filter_mode == "all":
+        args.min_paths = 1
+    # in mode "clustered" we keep args.min_paths as defined (default 6)
 
     base = os.path.abspath(args.base_dir)
     scenario_dir = args.scenario_dir or os.path.join(base, "LuSTScenario", "scenario")
@@ -1703,7 +1772,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     print(f"  vtypes    : {args.vtypes_mode}")
     print(f"  busstops  : {args.busstops_mode}")
     print(f"  path filter: "
-          f"{'OFF' if args.skip_path_filter else f'ON (min_paths={args.min_paths})'}")
+          f"{'OFF' if args.skip_path_filter else f'ON (mode={args.filter_mode}, min_paths={args.min_paths})'}")
 
     if args.keep_output:
         os.makedirs(output_dir, exist_ok=True)
@@ -1849,31 +1918,34 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     # --- Path availability filter ------------------------------------------
     od_filter_stats = None
+    background_segs = []
     if not args.skip_path_filter:
         print("\n" + "=" * 75)
         print("FILTERING OD PAIRS BY PATH AVAILABILITY")
         print("=" * 75)
         cropped_con_path = os.path.join(output_dir, f"{args.network_name}.con.xml")
-        segments, od_filter_stats = filter_od_by_path_availability(
-            segments, cropped_con_path,
-            min_paths=args.min_paths,
-            max_paths_probe=args.max_paths_probe,
-            similarity_threshold=args.path_similarity,
-            timeout_s=args.path_timeout,
-        )
+        
+        segments, background_segs, unreachable_segs, od_filter_stats = \
+            filter_od_by_path_availability(
+                segments, cropped_con_path,
+                min_paths=args.min_paths,
+                max_paths_probe=args.max_paths_probe,
+                similarity_threshold=args.path_similarity,
+                timeout_s=args.path_timeout,
+            )
+            
         print(f"\n  --- OD filter summary ---")
+        print(f"    filter mode            : {args.filter_mode}")
+        print(f"    min_paths (for AVs)    : {args.min_paths}")
         print(f"    OD pairs total         : {od_filter_stats['od_pairs_total']}")
-        print(f"    OD pairs kept          : {od_filter_stats['od_pairs_kept']}  "
-              f"(>= {args.min_paths} distinct paths)")
-        print(f"    OD pairs dropped       : {od_filter_stats['od_pairs_dropped']}")
+        print(f"    OD pairs kept as AVs   : {od_filter_stats['od_pairs_kept']}")
+        print(f"    OD pairs to background : {od_filter_stats['od_pairs_background']}")
+        print(f"    OD pairs unreachable   : {od_filter_stats['od_pairs_unreachable']}")
         print(f"    Agents before filter   : {od_filter_stats['agents_before']}")
-        print(f"    Agents after filter    : {od_filter_stats['agents_after']}")
-        dropped_n = od_filter_stats['agents_before'] - od_filter_stats['agents_after']
-        if od_filter_stats['agents_before'] > 0:
-            pct = 100 * dropped_n / od_filter_stats['agents_before']
-            print(f"    Agents dropped         : {dropped_n} ({pct:.1f}%)")
-        print(f"    Path-count distribution: "
-              f"{od_filter_stats['path_count_distribution']}")
+        print(f"    Agents kept as AVs     : {od_filter_stats['agents_after']}")
+        print(f"    Agents to background   : {od_filter_stats['agents_background']}")
+        print(f"    Agents unreachable     : {od_filter_stats['agents_unreachable']}")
+        
         if len(segments) == 0:
             print("  [fatal] no agents left after path filtering. Aborting.")
             return 3
@@ -1922,6 +1994,16 @@ def main(argv: Optional[List[str]] = None) -> int:
             if os.path.exists(out_path):
                 os.remove(out_path)
 
+    # --- Inject NetworkX-dropped agents into background_buses ---
+    if args.filter_mode == "clustered" and background_segs:
+        bg_bus_path = os.path.join(output_dir, "background_buslines.rou.xml")
+        n_bg_h = append_humans_to_background_buses(bg_bus_path, background_segs)
+        print(f"  injected {n_bg_h} background human(s) into background_buslines.rou.xml")
+        
+        # Make sure the file is tracked in route_files
+        if "background_buslines.rou.xml" not in bus_route_files:
+            bus_route_files.append("background_buslines.rou.xml")
+
     src_vtypes = os.path.join(scenario_dir, LUST_VTYPES_FILE)
     if os.path.exists(src_vtypes):
         shutil.copy2(src_vtypes, os.path.join(output_dir, "vtypes.add.xml"))
@@ -1960,13 +2042,6 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
 
     # --- Rewrite custom.sumocfg with the final URB file layout -------------
-    # After post-processing, local.0.rou.xml is now human_demand.rou.xml,
-    # background_buslines.rou.xml is now background_buses.rou.xml, and
-    # vtypes.add.xml / busstops.add.xml have usually been inlined / removed.
-    # The pre-postprocess sumocfg points to the old names, so it must be
-    # regenerated with the new ones. If the config was moved into
-    # _validation/, all paths get a '../' prefix so SUMO resolves them
-    # correctly from inside that sub-folder.
     if args.keep_sumocfg:
         final_cfg = os.path.join(output_dir, "custom.sumocfg")
         prefix = ""
@@ -2032,9 +2107,11 @@ def main(argv: Optional[List[str]] = None) -> int:
             },
             demand_stats={
                 "num_agents": n_agents,
+                "num_background_humans": len(background_segs) if args.filter_mode == "clustered" else 0,
                 "num_split_vehicles": st["split_vehicles"],
                 "num_from_outside": st["from_outside"],
                 "num_bus_segments": n_bus_segments,
+                "filter_mode": args.filter_mode,
             },
             od_filter=od_filter_stats,
             sumo_stats=sumo_stats,
@@ -2051,7 +2128,6 @@ def main(argv: Optional[List[str]] = None) -> int:
     print(f"\nDone. Output: {output_dir}")
     print(f"Final agent count after all filters: {final_agent_count}")
     return 0
-
 
 if __name__ == "__main__":
     sys.exit(main())
