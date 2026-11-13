@@ -360,6 +360,35 @@ python apply_bad_od_filter.py --network-dir "URB/networks/luxembourg_south_bonne
 If the drop ratio is < 10 %, apply directly. If it is > 30 %, consider
 switching to clustered routes instead (see §9).
 
+PATCHED:
+
+### Dropped agents: discard or reinject as background?
+
+After running `check_janux_od.py`, some (origin, destination) pairs may fail
+in JanuX (too few distinct paths). `apply_bad_od_filter.py` removes the
+affected agents from the RL-visible files (`agents.csv`, `demand_routes.csv`,
+`od_<net>.txt`). Two behaviours are available for the vehicles themselves:
+
+- `discard` (default):
+  The dropped agents are removed from the RL files. They are NOT removed
+  from `human_demand.rou.xml`, so SUMO keeps simulating them in the custom.sumocfg. But RouteRL never sees them and the we have discarded traffic. (Okay if the drop ratio is very small)
+
+  python apply_bad_od_filter.py --network-dir directory-name --dropped-action discard --apply
+
+- `background` (explicit move when you want background traffic to
+  be clearly separated from the RL demand):
+  The dropped agents are MOVED from `human_demand.rou.xml` into
+  `background_buses.rou.xml` (no duplication; both `.rou.xml` files already
+  appear in `custom.sumocfg`, so no config change is required). Useful if
+  you want to keep a correct traffic simualtion (if a lot of agents don't have enough paths to became AVs): Put them in background_buses and remove from agents.csv so only the agents with differnt paths (necessary for Janux, or else it keeps running forever) can become AVs.
+
+  python apply_bad_od_filter.py --network-dir directory-name --dropped-action background --apply
+
+Backups are saved as `<file>.bak` before any overwrite. Dry-run (no `--apply`) reports
+how many agents would be moved or removed.
+
+TO BE TAKEN INTO ACCOUNT: When human agents are moved to background demand, the route rl stats are not computed on them; ie if you have 500 agents that don't have enough path for Janux and you put them in the background files with the buses, their travel time is not taken into account for the means etc that route rl plots, only the agents.csv is taken for that (may be subject to change in the future)
+
 ---
 
 ## 7. `try_crops.py` — visualize and compare candidate windows
