@@ -1,0 +1,22 @@
+Loading net-file from '.\../luxembourg_south_bonnevoie_better.net.xml' ... done (135ms).
+Loading route-files incrementally from '.\../background_buses.rou.xml'
+Loading route-files incrementally from '.\../human_demand.rou.xml'
+Loading done.
+Simulation started with time: 0.00.
+Simulation ended at time: 3091.00.
+Reason: All vehicles have left the simulation.
+Performance:
+ Duration: 424.92s
+ Real time factor: 7.27426
+ UPS: 1643.613078
+Vehicles:
+ Inserted: 3075
+ Running: 0
+ Waiting: 0
+Statistics (avg of 3075):
+ RouteLength: 1957.14
+ Speed: 9.21
+ Duration: 227.12
+ WaitingTime: 52.97
+ TimeLoss: 94.40
+ DepartDelay: 1.01

@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<configuration xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+               xsi:noNamespaceSchemaLocation="http://sumo.dlr.de/xsd/sumoConfiguration.xsd">
+    <input>
+        <net-file value="../luxembourg_south_bonnevoie_better.net.xml"/>
+        <route-files value="../background_buses.rou.xml,../human_demand.rou.xml"/>
+    </input>
+    <time>
+        <begin value="0"/>
+    </time>
+    <output>
+        <statistic-output value="stats.xml"/>
+        <summary-output value="summary.xml"/>
+        <tripinfo-output value="tripinfo.xml"/>
+    </output>
+    <processing>
+        <time-to-teleport value="600"/>
+        <ignore-junction-blocker value="20"/>
+        <max-depart-delay value="600"/>
+    </processing>
+    <report>
+        <no-step-log value="true"/>
+        <duration-log.statistics value="true"/>
+        <message-log value="sumo_messages.log"/>
+        <error-log value="sumo_errors.log"/>
+    </report>
+</configuration>
